@@ -2,9 +2,17 @@
 
 A performance-analysis tool and scheduling simulator that quantifies CPU context-switching overhead and measures system-level resource allocation under process contention.
 
+## 📊 Interactive Simulation Dashboard
+![Round Robin Simulation](context-Switching-2/screenshots/IMG-20260416-WA0016.jpg)
+
 ## 🚀 Core Features
 * **Interactive Simulation Dashboard**: Visualize CPU scheduling in real-time.
-* **Supported Algorithms**: Simulates First-Come-First-Serve (FCFS), Shortest Job First (SJF), and Round Robin (RR) algorithms.
+* **Supported Algorithms**: Simulates First-Come-First-Serve (FCFS), Shortest Job First (SJF), and Round Robin (RR) algorithms. The simulator dynamically adapts Gantt chart visualizations and calculates exact performance loss.
+
+| FCFS Scheduling | SJF Scheduling |
+| :---: | :---: |
+| ![FCFS](context-Switching-2/screenshots/IMG-20260416-WA0019.jpg) | ![SJF](context-Switching-2/screenshots/IMG-20260416-WA0021.jpg) |
+
 * **Gantt Chart Visualizations**: Dynamically adapts and visualizes process execution timelines.
 * **Exact Metrics Calculation**: Calculates key scheduling metrics, including:
   * **Context Switches**: Total number of times the CPU switches between active processes.
