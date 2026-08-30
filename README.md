@@ -32,6 +32,9 @@ A performance-analysis tool and scheduling simulator that quantifies CPU context
 
 ## ⚙️ How to Run
 1. Navigate to the `context-Switching-2/backend` directory.
-2. Ensure you have Python installed and run `pip install fastapi uvicorn pydantic`.
-3. Run the backend server: `uvicorn main:app --reload --port 8000`.
-4. Open `context-Switching-2/frontend/Context-Switch.html` in your web browser to access the dashboard.
+2. It is recommended to create a virtual environment first:
+   * **Windows**: `python -m venv venv` and activate with `venv\Scripts\activate`
+   * **Mac/Linux**: `python3 -m venv venv` and activate with `source venv/bin/activate`
+3. Install the dependencies: `pip install fastapi uvicorn pydantic`.
+4. Run the backend server: `uvicorn main:app --reload --port 8000`.
+5. Open `context-Switching-2/frontend/Context-Switch.html` in your web browser to access the dashboard.

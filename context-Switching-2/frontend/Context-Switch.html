@@ -731,7 +731,7 @@ function buildResult(rawTimeline, processes) {
 }
 
 /* ─── BACKEND API ─────────────────────────── */
-const API_BASE = 'http://localhost:8010';
+const API_BASE = 'http://localhost:8000';
 
 async function fetchBackendSimulation(processes, algorithm, quantum, csOverheadMs) {
   const resp = await fetch(`${API_BASE}/simulate`, {
