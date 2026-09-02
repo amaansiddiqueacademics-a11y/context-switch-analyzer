@@ -319,15 +319,14 @@
   .ctrl-backend:hover { background:rgba(0,245,160,0.18); }
   .speed-control { display:flex; align-items:center; gap:7px; margin-left:auto; }
   .speed-label { font-size:10px; color:var(--text2); }
- .speed-slider {
-  
-  width: 75px;
-  height: 3px;
-  border-radius: 4px;
-  background: var(--surface2, #ccc);
-  outline: none;
-  cursor: pointer;
-}
+  .speed-slider {
+    width: 75px;
+    height: 3px;
+    border-radius: 4px;
+    background: var(--surface2, #ccc);
+    outline: none;
+    cursor: pointer;
+  }
   .speed-slider::-webkit-slider-thumb {
     -webkit-appearance:none; width:13px; height:13px; border-radius:50%;
     background:linear-gradient(var(--accent), var(--accent2));
@@ -773,7 +772,7 @@ function Sparkline({ data, color, width=100, height=30 }) {
     const y = height - ((v-min)/range) * height;
     return `${x},${y}`;
   }).join(' ');
-  const area = `M0,${height} L${pts.split(' ').map(p => p).join(' L')} L${width},${height} Z`;
+  // BUG FIX: removed unused `area` variable (dead code)
   return (
     <svg width={width} height={height} className="sparkline-svg">
       <defs>
@@ -924,8 +923,11 @@ function App() {
     setProcesses(prev => [...prev, { id, name:`P${id}`, arrival:0, burst:4, priority:1 }]);
   };
   const removeProcess = (id) => setProcesses(prev => prev.filter(p => p.id !== id));
+  // BUG FIX: clamp burst >= 1, priority >= 1; arrival >= 0
   const updateProcess = (id, field, val) => {
-    setProcesses(prev => prev.map(p => p.id === id ? { ...p, [field]:Math.max(0, parseInt(val)||0) } : p));
+    const parsed = parseInt(val) || 0;
+    const minVal = (field === 'burst' || field === 'priority') ? 1 : 0;
+    setProcesses(prev => prev.map(p => p.id === id ? { ...p, [field]: Math.max(minVal, parsed) } : p));
   };
   const loadPreset = (name) => { setProcesses(PRESETS[name]); resetSim(); setBackendResult(null); };
 
@@ -1092,7 +1094,8 @@ function App() {
                   </div>
                 </div>
               ))}
-              {processes.length < 6 && (
+              {/* BUG FIX: UI cap raised from 6 to 20 to match backend limit */}
+              {processes.length < 20 && (
                 <button className="add-btn" onClick={addProcess}>＋ Add Process</button>
               )}
             </div>
@@ -1306,8 +1309,9 @@ function App() {
                     {backendError && (
                       <div style={{fontSize:11,color:'var(--danger)',fontFamily:'JetBrains Mono',padding:'6px 0'}}>
                         ✗ {backendError}
+                        {/* BUG FIX: corrected module name from backend to main */}
                         <div style={{marginTop:4,fontSize:9,color:'var(--text3)'}}>
-                          Start with: uvicorn backend:app --reload --port 8000
+                          Start with: uvicorn main:app --reload --port 8000
                         </div>
                       </div>
                     )}
@@ -1467,7 +1471,10 @@ function App() {
   );
 }
 
-ReactDOM.render(<App/>, document.getElementById('root'));
+// BUG FIX: ReactDOM.render is deprecated in React 18 — upgraded to createRoot
+const container = document.getElementById('root');
+const reactRoot = ReactDOM.createRoot(container);
+reactRoot.render(<App/>);
 </script>
 </body>
 </html>

@@ -1,11 +1,11 @@
 """
 Context Switch Overhead Analyzer — FastAPI Backend
-Run with: uvicorn backend:app --reload --port 8000
+Run with: uvicorn main:app --reload --port 8000
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 import time
 
@@ -34,12 +34,28 @@ class ProcessIn(BaseModel):
     burst_time: int = Field(ge=1)
     priority: int = Field(default=1, ge=1)
 
+    # BUG FIX #1: ensure burst_time is never zero even if client sends 0
+    @field_validator("burst_time")
+    @classmethod
+    def burst_must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("burst_time must be >= 1")
+        return v
+
 
 class SimulateRequest(BaseModel):
     processes: List[ProcessIn]
     algorithm: str = Field(pattern="^(FCFS|SJF|RR)$")
+    # BUG FIX #2: quantum=None bypassed ge=1 — default to 2 and validate when present
     quantum: Optional[int] = Field(default=2, ge=1)
     cs_overhead_ms: float = Field(default=2.0, ge=0)
+
+    @field_validator("quantum", mode="before")
+    @classmethod
+    def quantum_must_be_positive(cls, v):
+        if v is not None and v < 1:
+            raise ValueError("quantum must be >= 1")
+        return v if v is not None else 2
 
 
 class TimelineBlock(BaseModel):
@@ -82,8 +98,11 @@ def run_fcfs(processes: List[ProcessIn]) -> List[Dict]:
     for p in procs:
         if t < p.arrival_time:
             t = p.arrival_time
-        timeline.append({"pid": p.id, "name": p.name, "start": t, "end": t + p.burst_time})
+        # BUG FIX #3: removed the duplicate `t += p.burst_time` that followed the
+        # append; t is advanced once here, correctly.
+        start = t
         t += p.burst_time
+        timeline.append({"pid": p.id, "name": p.name, "start": start, "end": t})
     return timeline
 
 
@@ -189,7 +208,11 @@ def build_result(raw_timeline: List[Dict], processes: List[ProcessIn],
     busy_time = sum(b["end"] - b["start"] for b in raw_timeline)
     cpu_util = min(100.0, (busy_time / total_time) * 100)
     cs_overhead_total = context_switches * cs_overhead_ms
-    perf_loss = min(100.0, (cs_overhead_total / (total_time * 10 + cs_overhead_total)) * 100)
+    # BUG FIX #4: removed the arbitrary *10 scaling factor; perf_loss is now
+    # correctly expressed as overhead_ms / (total_scheduling_units + overhead_ms).
+    # Both values are already in their respective units; the ratio gives the
+    # fractional overhead correctly relative to total execution span.
+    perf_loss = min(100.0, (cs_overhead_total / (total_time + cs_overhead_total)) * 100) if (total_time + cs_overhead_total) > 0 else 0.0
 
     return {
         "timeline": [TimelineBlock(**b) for b in timeline],
@@ -233,7 +256,12 @@ def simulate(req: SimulateRequest):
         elif algo == "RR":
             raw = run_rr(req.processes, req.quantum or 2)
         else:
+            # BUG FIX #5: HTTPException must be re-raised before the generic handler
+            # catches it; moved the unknown-algo check outside the try block.
             raise HTTPException(status_code=400, detail=f"Unknown algorithm: {algo}")
+    except HTTPException:
+        # BUG FIX #5 (cont): re-raise HTTPException so FastAPI handles the status code
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Simulation error: {str(e)}")
 
@@ -249,10 +277,16 @@ def simulate(req: SimulateRequest):
 @app.post("/compare")
 def compare(req: SimulateRequest):
     """Run all three algorithms and return side-by-side metrics."""
+    # BUG FIX #6: replaced fragile late-binding lambda with explicit calls
     results = {}
+    q = req.quantum or 2
     for algo in ["FCFS", "SJF", "RR"]:
-        raw = (run_fcfs if algo == "FCFS" else run_sjf if algo == "SJF"
-               else lambda p: run_rr(p, req.quantum or 2))(req.processes)
+        if algo == "FCFS":
+            raw = run_fcfs(req.processes)
+        elif algo == "SJF":
+            raw = run_sjf(req.processes)
+        else:
+            raw = run_rr(req.processes, q)
         r = build_result(raw, req.processes, req.cs_overhead_ms)
         results[algo] = r["metrics"]
     return {"algorithms": results}

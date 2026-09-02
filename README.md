@@ -38,6 +38,7 @@ context-switch-analyzer/
 | Layer | Technology |
 |---|---|
 | UI Library | React 18 (CDN UMD build) |
+
 | Transpiler | Babel Standalone |
 | Fonts | Syne + JetBrains Mono (Google Fonts) |
 | Styling | Vanilla CSS (CSS Custom Properties, animations) |
