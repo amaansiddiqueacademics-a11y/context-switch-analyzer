@@ -3,11 +3,19 @@ Context Switch Overhead Analyzer — FastAPI Backend
 Run with: uvicorn main:app --reload --port 8000
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
 import time
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
+
+# Limits keep every simulation bounded (a huge burst with a tiny quantum would
+# otherwise run for minutes and exhaust memory).
+MAX_PROCESSES = 20
+MAX_TIME = 1000  # upper bound for arrival_time, burst_time and quantum
 
 app = FastAPI(
     title="Context Switch Overhead Analyzer API",
@@ -15,14 +23,24 @@ app = FastAPI(
     version="3.0.0",
 )
 
-# Allow frontend dev origins
+# The frontend is usually opened straight from disk (file://), whose origin is
+# "null", so origins cannot be pinned. No cookies or auth are used, so
+# credentials stay disabled.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # Tighten in production
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    # Say where and why validation failed, but don't echo the rejected input back:
+    # values such as Infinity cannot be encoded as JSON and would turn the 422 into a 500.
+    errors = [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 # ─── MODELS ────────────────────────────────────────────────────────────────────
@@ -30,32 +48,30 @@ app.add_middleware(
 class ProcessIn(BaseModel):
     id: int
     name: str
-    arrival_time: int = Field(ge=0)
-    burst_time: int = Field(ge=1)
+    arrival_time: int = Field(ge=0, le=MAX_TIME)
+    burst_time: int = Field(ge=1, le=MAX_TIME)
     priority: int = Field(default=1, ge=1)
-
-    # BUG FIX #1: ensure burst_time is never zero even if client sends 0
-    @field_validator("burst_time")
-    @classmethod
-    def burst_must_be_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("burst_time must be >= 1")
-        return v
 
 
 class SimulateRequest(BaseModel):
-    processes: List[ProcessIn]
+    processes: List[ProcessIn] = Field(min_length=1, max_length=MAX_PROCESSES)
     algorithm: str = Field(pattern="^(FCFS|SJF|RR)$")
-    # BUG FIX #2: quantum=None bypassed ge=1 — default to 2 and validate when present
-    quantum: Optional[int] = Field(default=2, ge=1)
-    cs_overhead_ms: float = Field(default=2.0, ge=0)
+    quantum: int = Field(default=2, ge=1, le=MAX_TIME)
+    cs_overhead_ms: float = Field(default=2.0, ge=0, allow_inf_nan=False)
 
     @field_validator("quantum", mode="before")
     @classmethod
-    def quantum_must_be_positive(cls, v):
-        if v is not None and v < 1:
-            raise ValueError("quantum must be >= 1")
-        return v if v is not None else 2
+    def null_quantum_uses_default(cls, v):
+        # Clients may send an explicit null (e.g. for non-RR algorithms).
+        return 2 if v is None else v
+
+    @field_validator("processes")
+    @classmethod
+    def process_ids_must_be_unique(cls, v: List[ProcessIn]) -> List[ProcessIn]:
+        ids = [p.id for p in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("process ids must be unique")
+        return v
 
 
 class TimelineBlock(BaseModel):
@@ -64,7 +80,6 @@ class TimelineBlock(BaseModel):
     start: float
     end: float
     is_switch: bool = False
-    color: Optional[str] = None
 
 
 class ProcessMetric(BaseModel):
@@ -93,13 +108,9 @@ class SimulateResponse(BaseModel):
 # ─── SCHEDULING ENGINES ────────────────────────────────────────────────────────
 
 def run_fcfs(processes: List[ProcessIn]) -> List[Dict]:
-    procs = sorted(processes, key=lambda p: p.arrival_time)
     timeline, t = [], 0
-    for p in procs:
-        if t < p.arrival_time:
-            t = p.arrival_time
-        # BUG FIX #3: removed the duplicate `t += p.burst_time` that followed the
-        # append; t is advanced once here, correctly.
+    for p in sorted(processes, key=lambda p: p.arrival_time):
+        t = max(t, p.arrival_time)
         start = t
         t += p.burst_time
         timeline.append({"pid": p.id, "name": p.name, "start": start, "end": t})
@@ -107,26 +118,26 @@ def run_fcfs(processes: List[ProcessIn]) -> List[Dict]:
 
 
 def run_sjf(processes: List[ProcessIn]) -> List[Dict]:
-    procs = [{"id": p.id, "name": p.name, "arrival": p.arrival_time,
-               "burst": p.burst_time, "remaining": p.burst_time} for p in processes]
-    timeline, t, done = [], 0, set()
+    pending = list(processes)
+    timeline, t = [], 0
 
-    while len(done) < len(procs):
-        available = [p for p in procs if p["arrival"] <= t and p["id"] not in done]
+    while pending:
+        available = [p for p in pending if p.arrival_time <= t]
         if not available:
-            t += 1
+            # CPU idle: jump straight to the next arrival.
+            t = min(p.arrival_time for p in pending)
             continue
-        shortest = min(available, key=lambda x: x["burst"])
-        timeline.append({"pid": shortest["id"], "name": shortest["name"],
-                          "start": t, "end": t + shortest["burst"]})
-        t += shortest["burst"]
-        done.add(shortest["id"])
+        shortest = min(available, key=lambda p: p.burst_time)
+        timeline.append({"pid": shortest.id, "name": shortest.name,
+                         "start": t, "end": t + shortest.burst_time})
+        t += shortest.burst_time
+        pending.remove(shortest)
     return timeline
 
 
 def run_rr(processes: List[ProcessIn], quantum: int) -> List[Dict]:
     procs = [{"id": p.id, "name": p.name, "arrival": p.arrival_time,
-               "burst": p.burst_time, "remaining": p.burst_time} for p in processes]
+              "remaining": p.burst_time} for p in processes]
     sorted_procs = sorted(procs, key=lambda x: x["arrival"])
     timeline, queue, in_queue = [], [], set()
     t, idx = 0, 0
@@ -165,12 +176,22 @@ def run_rr(processes: List[ProcessIn], quantum: int) -> List[Dict]:
     return timeline
 
 
+def run_algorithm(algorithm: str, processes: List[ProcessIn], quantum: int) -> List[Dict]:
+    if algorithm == "FCFS":
+        return run_fcfs(processes)
+    if algorithm == "SJF":
+        return run_sjf(processes)
+    if algorithm == "RR":
+        return run_rr(processes, quantum)
+    raise ValueError(f"Unknown algorithm: {algorithm}")
+
+
 def build_result(raw_timeline: List[Dict], processes: List[ProcessIn],
                  cs_overhead_ms: float) -> Dict:
-    # Insert context switch markers
+    # Insert context switch markers between blocks of different processes
     timeline = []
     for i, block in enumerate(raw_timeline):
-        if i > 0 and raw_timeline[i]["pid"] != raw_timeline[i - 1]["pid"]:
+        if i > 0 and block["pid"] != raw_timeline[i - 1]["pid"]:
             timeline.append({
                 "pid": None, "name": "CS",
                 "start": raw_timeline[i - 1]["end"],
@@ -181,7 +202,6 @@ def build_result(raw_timeline: List[Dict], processes: List[ProcessIn],
 
     total_time = raw_timeline[-1]["end"] if raw_timeline else 1
 
-    # Count switches
     context_switches = sum(
         1 for i in range(1, len(raw_timeline))
         if raw_timeline[i]["pid"] != raw_timeline[i - 1]["pid"]
@@ -207,12 +227,12 @@ def build_result(raw_timeline: List[Dict], processes: List[ProcessIn],
     avg_turnaround = sum(m.turnaround for m in process_metrics) / len(process_metrics) if process_metrics else 0
     busy_time = sum(b["end"] - b["start"] for b in raw_timeline)
     cpu_util = min(100.0, (busy_time / total_time) * 100)
+
+    # One simulated time unit is one millisecond, so the overhead can be compared
+    # directly with the schedule length: loss = overhead / (schedule + overhead).
     cs_overhead_total = context_switches * cs_overhead_ms
-    # BUG FIX #4: removed the arbitrary *10 scaling factor; perf_loss is now
-    # correctly expressed as overhead_ms / (total_scheduling_units + overhead_ms).
-    # Both values are already in their respective units; the ratio gives the
-    # fractional overhead correctly relative to total execution span.
-    perf_loss = min(100.0, (cs_overhead_total / (total_time + cs_overhead_total)) * 100) if (total_time + cs_overhead_total) > 0 else 0.0
+    denominator = total_time + cs_overhead_total
+    perf_loss = min(100.0, cs_overhead_total / denominator * 100) if denominator > 0 else 0.0
 
     return {
         "timeline": [TimelineBlock(**b) for b in timeline],
@@ -242,33 +262,10 @@ def health():
 
 @app.post("/simulate", response_model=SimulateResponse)
 def simulate(req: SimulateRequest):
-    if not req.processes:
-        raise HTTPException(status_code=400, detail="At least one process required")
-    if len(req.processes) > 20:
-        raise HTTPException(status_code=400, detail="Maximum 20 processes")
-
-    algo = req.algorithm
-    try:
-        if algo == "FCFS":
-            raw = run_fcfs(req.processes)
-        elif algo == "SJF":
-            raw = run_sjf(req.processes)
-        elif algo == "RR":
-            raw = run_rr(req.processes, req.quantum or 2)
-        else:
-            # BUG FIX #5: HTTPException must be re-raised before the generic handler
-            # catches it; moved the unknown-algo check outside the try block.
-            raise HTTPException(status_code=400, detail=f"Unknown algorithm: {algo}")
-    except HTTPException:
-        # BUG FIX #5 (cont): re-raise HTTPException so FastAPI handles the status code
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Simulation error: {str(e)}")
-
+    raw = run_algorithm(req.algorithm, req.processes, req.quantum)
     result = build_result(raw, req.processes, req.cs_overhead_ms)
-
     return SimulateResponse(
-        algorithm=algo,
+        algorithm=req.algorithm,
         computed_at=time.time(),
         **result,
     )
@@ -277,18 +274,10 @@ def simulate(req: SimulateRequest):
 @app.post("/compare")
 def compare(req: SimulateRequest):
     """Run all three algorithms and return side-by-side metrics."""
-    # BUG FIX #6: replaced fragile late-binding lambda with explicit calls
     results = {}
-    q = req.quantum or 2
-    for algo in ["FCFS", "SJF", "RR"]:
-        if algo == "FCFS":
-            raw = run_fcfs(req.processes)
-        elif algo == "SJF":
-            raw = run_sjf(req.processes)
-        else:
-            raw = run_rr(req.processes, q)
-        r = build_result(raw, req.processes, req.cs_overhead_ms)
-        results[algo] = r["metrics"]
+    for algo in ("FCFS", "SJF", "RR"):
+        raw = run_algorithm(algo, req.processes, req.quantum)
+        results[algo] = build_result(raw, req.processes, req.cs_overhead_ms)["metrics"]
     return {"algorithms": results}
 
 
@@ -296,21 +285,21 @@ def compare(req: SimulateRequest):
 def presets():
     return {
         "Low Load": [
-            {"id":1,"name":"P1","arrival_time":0,"burst_time":5,"priority":1},
-            {"id":2,"name":"P2","arrival_time":2,"burst_time":3,"priority":2},
-            {"id":3,"name":"P3","arrival_time":4,"burst_time":2,"priority":3},
+            {"id": 1, "name": "P1", "arrival_time": 0, "burst_time": 5, "priority": 1},
+            {"id": 2, "name": "P2", "arrival_time": 2, "burst_time": 3, "priority": 2},
+            {"id": 3, "name": "P3", "arrival_time": 4, "burst_time": 2, "priority": 3},
         ],
         "High Load": [
-            {"id":1,"name":"P1","arrival_time":0,"burst_time":8,"priority":2},
-            {"id":2,"name":"P2","arrival_time":1,"burst_time":4,"priority":1},
-            {"id":3,"name":"P3","arrival_time":2,"burst_time":6,"priority":3},
-            {"id":4,"name":"P4","arrival_time":3,"burst_time":2,"priority":1},
-            {"id":5,"name":"P5","arrival_time":5,"burst_time":5,"priority":2},
+            {"id": 1, "name": "P1", "arrival_time": 0, "burst_time": 8, "priority": 2},
+            {"id": 2, "name": "P2", "arrival_time": 1, "burst_time": 4, "priority": 1},
+            {"id": 3, "name": "P3", "arrival_time": 2, "burst_time": 6, "priority": 3},
+            {"id": 4, "name": "P4", "arrival_time": 3, "burst_time": 2, "priority": 1},
+            {"id": 5, "name": "P5", "arrival_time": 5, "burst_time": 5, "priority": 2},
         ],
         "Burst Storm": [
-            {"id":1,"name":"P1","arrival_time":0,"burst_time":10,"priority":3},
-            {"id":2,"name":"P2","arrival_time":0,"burst_time":1, "priority":1},
-            {"id":3,"name":"P3","arrival_time":0,"burst_time":3, "priority":2},
-            {"id":4,"name":"P4","arrival_time":1,"burst_time":2, "priority":1},
+            {"id": 1, "name": "P1", "arrival_time": 0, "burst_time": 10, "priority": 3},
+            {"id": 2, "name": "P2", "arrival_time": 0, "burst_time": 1, "priority": 1},
+            {"id": 3, "name": "P3", "arrival_time": 0, "burst_time": 3, "priority": 2},
+            {"id": 4, "name": "P4", "arrival_time": 1, "burst_time": 2, "priority": 1},
         ],
     }
