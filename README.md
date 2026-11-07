@@ -1,4 +1,4 @@
-﻿# ⚡ Context Switch Overhead Analyzer
+# ⚡ Context Switch Overhead Analyzer
 
 > A full-stack, interactive CPU process scheduling simulator that visualizes context switching overhead in real time — built with a FastAPI Python backend and a React-powered single-page frontend.
 
@@ -38,7 +38,6 @@ context-switch-analyzer/
 | Layer | Technology |
 |---|---|
 | UI Library | React 18 (CDN UMD build) |
-
 | Transpiler | Babel Standalone |
 | Fonts | Syne + JetBrains Mono (Google Fonts) |
 | Styling | Vanilla CSS (CSS Custom Properties, animations) |
@@ -51,7 +50,7 @@ context-switch-analyzer/
 ### 🔀 Scheduling Algorithms
 - **FCFS** — First Come, First Served (non-preemptive, arrival-time ordered)
 - **SJF** — Shortest Job First (non-preemptive, greedy shortest-burst)
-- **RR** — Round Robin with a configurable **time quantum** (1–∞ units)
+- **RR** — Round Robin with a configurable **time quantum** (1–1000 units)
 
 ### 📊 Real-Time Simulation
 - Animated **Gantt chart** with process blocks and golden context-switch markers
@@ -65,7 +64,7 @@ context-switch-analyzer/
 - **CPU Utilization %** with animated sparkline history
 - Total **Context Switches** count
 - **Context Switch Overhead** (ms) based on configurable overhead per switch
-- **Performance Loss %** due to context switching
+- **Performance Loss %** due to context switching: `overhead / (schedule length + overhead)`, where one simulated time unit equals 1 ms
 
 ### ⚖️ Algorithm Comparison Mode
 - Run FCFS, SJF, and RR **simultaneously** against the same process set
@@ -99,8 +98,8 @@ python -m venv venv
 venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS / Linux
 
-# Install dependencies
-pip install fastapi uvicorn pydantic
+# Install the pinned dependencies
+pip install -r requirements.txt
 
 # Start the development server
 uvicorn main:app --reload --port 8000
@@ -111,14 +110,15 @@ Interactive docs: http://localhost:8000/docs
 
 ### 2. Frontend Setup
 
-No build step required. Simply open the file in your browser:
+No build step required. Simply open the file in your browser (an internet connection is needed to load React, Babel and the fonts from their CDNs):
 
 ```bash
-# Open directly in your default browser (Windows)
-start context-Switching-2/frontend/Context-Switch.html
+start context-Switching-2/frontend/Context-Switch.html        # Windows
+# open context-Switching-2/frontend/Context-Switch.html       # macOS
+# xdg-open context-Switching-2/frontend/Context-Switch.html   # Linux
 ```
 
-> **Note:** The frontend runs scheduling algorithms locally (in-browser) by default. Click the **"⚡ Run via Backend"** button to use the FastAPI engine instead.
+> **Note:** The frontend runs scheduling algorithms locally (in-browser) by default. Click the **"⚡ Run via API"** button to use the FastAPI engine instead.
 
 ---
 
@@ -129,7 +129,7 @@ start context-Switching-2/frontend/Context-Switch.html
 | GET | /health | Service health check |
 | POST | /simulate | Run a single scheduling simulation |
 | POST | /compare | Compare all three algorithms simultaneously |
-| GET | /presets | Retrieve preset process configurations |
+| GET | /presets | Retrieve preset process configurations (the UI bundles its own copy of the same presets) |
 
 ### Example — POST /simulate
 
@@ -151,10 +151,10 @@ start context-Switching-2/frontend/Context-Switch.html
   "algorithm": "RR",
   "context_switches": 3,
   "cs_overhead_total_ms": 6.0,
-  "perf_loss_pct": 0.09,
+  "perf_loss_pct": 37.5,
   "metrics": {
-    "avg_waiting_ms": 4.0,
-    "avg_turnaround_ms": 8.0,
+    "avg_waiting_ms": 3.5,
+    "avg_turnaround_ms": 8.5,
     "cpu_utilization_pct": 100.0
   }
 }
@@ -175,10 +175,13 @@ start context-Switching-2/frontend/Context-Switch.html
 
 ## 📋 Validation Rules
 
-- Minimum **1 process**, maximum **20 processes** per simulation
-- arrival_time >= 0; burst_time >= 1; priority >= 1
+- Minimum **1 process**, maximum **20 processes** per simulation, each with a **unique id**
+- 0 <= arrival_time <= 1000; 1 <= burst_time <= 1000; priority >= 1
 - Algorithm must be one of: FCFS, SJF, RR
-- Time quantum (quantum) >= 1 (only used for RR)
+- 1 <= quantum <= 1000 (only used for RR; defaults to 2 when omitted or null)
+- cs_overhead_ms must be a finite number >= 0
+- Invalid requests return **HTTP 422** with a `detail` list describing each problem
+- `priority` is accepted and shown in the UI, but FCFS, SJF and RR do not use it
 
 ---
 
