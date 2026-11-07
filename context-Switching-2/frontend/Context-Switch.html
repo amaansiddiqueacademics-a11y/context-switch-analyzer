@@ -43,22 +43,15 @@
   @keyframes pulse-glow { 0%,100%{box-shadow:0 0 8px rgba(93,99,245,0.4)} 50%{box-shadow:0 0 28px rgba(93,99,245,0.9),0 0 50px rgba(93,99,245,0.3)} }
   @keyframes shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
   @keyframes fadeSlideUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
-  @keyframes ripple { 0%{transform:scale(0);opacity:0.8} 100%{transform:scale(6);opacity:0} }
   @keyframes count-up { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
   @keyframes grid-move { 0%{transform:translateY(0)} 100%{transform:translateY(40px)} }
-  @keyframes process-slide { from{width:0;opacity:0} to{opacity:1} }
   @keyframes switch-flash { 0%,100%{background:rgba(255,215,0,0.06)} 50%{background:rgba(255,215,0,0.25)} }
   @keyframes cpu-run { 0%,100%{box-shadow:0 0 12px rgba(0,212,255,0.25),inset 0 0 12px rgba(0,212,255,0.04)} 50%{box-shadow:0 0 35px rgba(0,212,255,0.7),inset 0 0 20px rgba(0,212,255,0.08)} }
   @keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
   @keyframes bar-grow { from{height:0;opacity:0} to{opacity:1} }
-  @keyframes orbit { 0%{transform:rotate(0deg) translateX(28px) rotate(0deg)} 100%{transform:rotate(360deg) translateX(28px) rotate(-360deg)} }
-  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
-  @keyframes ticker-slide { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
   @keyframes bg-drift { 0%{transform:translate(0,0) scale(1)} 50%{transform:translate(30px,-20px) scale(1.05)} 100%{transform:translate(0,0) scale(1)} }
   @keyframes line-scan { 0%{top:-2px} 100%{top:100%} }
   @keyframes cs-pulse { 0%,100%{opacity:0.5;transform:scaleY(1)} 50%{opacity:1;transform:scaleY(1.08)} }
-  @keyframes badge-pop { 0%{transform:scale(0.8);opacity:0} 60%{transform:scale(1.12)} 100%{transform:scale(1);opacity:1} }
-  @keyframes glow-border { 0%,100%{border-color:rgba(93,99,245,0.3)} 50%{border-color:rgba(93,99,245,0.7)} }
   @keyframes slide-in-right { from{transform:translateX(20px);opacity:0} to{transform:translateX(0);opacity:1} }
   @keyframes wave { 0%,100%{transform:scaleY(0.3)} 50%{transform:scaleY(1)} }
 
@@ -375,19 +368,20 @@
   .gantt-canvas {
     position:relative; height:76px;
     border-radius:var(--radius-sm); background:rgba(0,0,0,0.22);
-    border:1px solid var(--border); overflow:hidden; display:flex;
+    border:1px solid var(--border); overflow:hidden;
   }
   .gantt-block {
-    height:100%; position:relative;
+    position:absolute; top:0; bottom:0;
     display:flex; align-items:center; justify-content:center;
     font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700;
-    color:white; transition:opacity 0.3s; flex-shrink:0; overflow:hidden; cursor:pointer;
+    color:white; transition:opacity 0.3s; overflow:hidden; cursor:pointer;
   }
   .gantt-block::after {
     content:''; position:absolute; inset:0;
     background:linear-gradient(180deg, rgba(255,255,255,0.14) 0%, transparent 55%);
   }
   .gantt-block.context-switch {
+    z-index:3; min-width:2px; pointer-events:none;
     background:repeating-linear-gradient(45deg, rgba(255,215,0,0.14), rgba(255,215,0,0.14) 3px, rgba(255,215,0,0.04) 3px, rgba(255,215,0,0.04) 8px);
     border-left:1px solid rgba(255,215,0,0.45); border-right:1px solid rgba(255,215,0,0.45);
     animation:switch-flash 0.9s ease-in-out;
@@ -601,14 +595,13 @@
   .export-btn:hover { background:var(--surface2); color:var(--text); border-color:var(--accent); }
 
   /* ── SPARKLINE ─────────────────────── */
-  .sparkline-wrap { position:relative; }
   .sparkline-svg { overflow:visible; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef } = React;
 
 /* ─── CONSTANTS ─────────────────────────── */
 const COLORS = [
@@ -620,7 +613,9 @@ const COLORS = [
   { bg:'#06b6d4', glow:'rgba(6,182,212,0.55)', light:'#67e8f9' },
 ];
 
-const CS_OVERHEAD_MS = 2;
+const CS_OVERHEAD_MS = 2;   // default context-switch cost per switch (ms)
+const MAX_PROCESSES = 20;   // same limit as the backend
+const MAX_TIME = 1000;      // cap for arrival, burst and quantum (same as the backend)
 
 const PRESETS = {
   'Low Load': [
@@ -724,9 +719,17 @@ function buildResult(rawTimeline, processes) {
   const avgTurnaround = processMetrics.reduce((s,p) => s+p.turnaround, 0) / processMetrics.length;
   const busyTime = rawTimeline.reduce((s,t) => s+(t.end-t.start), 0);
   const cpuUtil = Math.min(100, (busyTime/totalTime)*100);
-  const csOverhead = contextSwitches * CS_OVERHEAD_MS;
-  const perfLoss = Math.min(100, (csOverhead/(totalTime*10+csOverhead))*100);
-  return { timeline, rawTimeline, totalTime, contextSwitches, csOverhead, perfLoss, avgWaiting, avgTurnaround, cpuUtil, processMetrics };
+  return { timeline, rawTimeline, totalTime, contextSwitches, avgWaiting, avgTurnaround, cpuUtil, processMetrics };
+}
+
+// Context-switch cost for a result and the per-switch overhead chosen in the UI.
+// One simulated time unit is one millisecond (same formula as the backend):
+// loss = overhead / (schedule length + overhead).
+function csStats(result, overheadMs) {
+  const overhead = result.contextSwitches * overheadMs;
+  const denominator = result.totalTime + overhead;
+  const perfLoss = denominator > 0 ? Math.min(100, (overhead/denominator)*100) : 0;
+  return { overhead, perfLoss };
 }
 
 /* ─── BACKEND API ─────────────────────────── */
@@ -743,7 +746,14 @@ async function fetchBackendSimulation(processes, algorithm, quantum, csOverheadM
       cs_overhead_ms: csOverheadMs,
     }),
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const body = await resp.json();
+      detail = typeof body.detail === 'string' ? body.detail : (body.detail?.[0]?.msg || '');
+    } catch {}
+    throw new Error(`HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`);
+  }
   return resp.json();
 }
 
@@ -772,7 +782,6 @@ function Sparkline({ data, color, width=100, height=30 }) {
     const y = height - ((v-min)/range) * height;
     return `${x},${y}`;
   }).join(' ');
-  // BUG FIX: removed unused `area` variable (dead code)
   return (
     <svg width={width} height={height} className="sparkline-svg">
       <defs>
@@ -824,9 +833,6 @@ function MetricCard({ color, label, value, unit, history }) {
   );
 }
 
-/* ─── TICKER ─────────────────────────── */
-
-
 /* ─── MAIN APP ─────────────────────────── */
 function App() {
   const [light, setLight] = useState(false);
@@ -845,7 +851,6 @@ function App() {
   const [speed, setSpeed] = useState(2);
   const [showCompare, setShowCompare] = useState(false);
   const [tooltip, setTooltip] = useState(null);
-  const [compareResults, setCompareResults] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [backendStatus, setBackendStatus] = useState('checking');
   const [backendResult, setBackendResult] = useState(null);
@@ -923,22 +928,22 @@ function App() {
     setProcesses(prev => [...prev, { id, name:`P${id}`, arrival:0, burst:4, priority:1 }]);
   };
   const removeProcess = (id) => setProcesses(prev => prev.filter(p => p.id !== id));
-  // BUG FIX: clamp burst >= 1, priority >= 1; arrival >= 0
+  // Keep fields in range: arrival >= 0, burst/priority >= 1, arrival/burst <= MAX_TIME
   const updateProcess = (id, field, val) => {
     const parsed = parseInt(val) || 0;
     const minVal = (field === 'burst' || field === 'priority') ? 1 : 0;
-    setProcesses(prev => prev.map(p => p.id === id ? { ...p, [field]: Math.max(minVal, parsed) } : p));
+    const maxVal = field === 'priority' ? Infinity : MAX_TIME;
+    setProcesses(prev => prev.map(p => p.id === id ? { ...p, [field]: Math.min(maxVal, Math.max(minVal, parsed)) } : p));
   };
   const loadPreset = (name) => { setProcesses(PRESETS[name]); resetSim(); setBackendResult(null); };
 
-  const runCompare = () => {
-    const r = {
-      FCFS: buildResult(runFCFS(coloredProcesses).rawTimeline, coloredProcesses),
-      SJF:  buildResult(runSJF(coloredProcesses).rawTimeline,  coloredProcesses),
-      RR:   buildResult(runRR(coloredProcesses,quantum).rawTimeline, coloredProcesses),
-    };
-    setCompareResults(r); setShowCompare(true);
-  };
+  // Derived on every render so the comparison always matches the current processes and quantum.
+  const compareResults = showCompare && coloredProcesses.length > 0 ? {
+    FCFS: runFCFS(coloredProcesses),
+    SJF:  runSJF(coloredProcesses),
+    RR:   runRR(coloredProcesses, quantum),
+  } : null;
+  const runCompare = () => setShowCompare(true);
 
   // Run via backend
   const runWithBackend = async () => {
@@ -975,6 +980,8 @@ function App() {
   };
 
   const ganttWidth = result ? result.totalTime : 1;
+  const cs = result ? csStats(result, csOverheadMs) : null;
+  const tickCount = result ? Math.min(result.totalTime + 1, 21) : 0;
 
   /* ─ STATUS BADGE ─ */
   const statusConfig = {
@@ -1026,9 +1033,6 @@ function App() {
         </div>
       </div>
 
-      {/* ── TICKER ── */}
-      
-
       {/* ── MAIN ── */}
       <div className="main">
 
@@ -1049,7 +1053,7 @@ function App() {
                 <span className="quantum-label">Time Quantum</span>
                 <button className="adj-btn" onClick={() => setQuantum(q => Math.max(1,q-1))}>−</button>
                 <span className="quantum-val">{quantum}</span>
-                <button className="adj-btn" onClick={() => setQuantum(q => q+1)}>+</button>
+                <button className="adj-btn" onClick={() => setQuantum(q => Math.min(MAX_TIME, q+1))}>+</button>
               </div>
             )}
             <div className="quantum-row">
@@ -1083,10 +1087,10 @@ function App() {
                   </div>
                   <div className="process-fields">
                     <div className="field"><label>Arrival</label>
-                      <input type="number" min="0" value={p.arrival} onChange={e => updateProcess(p.id,'arrival',e.target.value)}/>
+                      <input type="number" min="0" max={MAX_TIME} value={p.arrival} onChange={e => updateProcess(p.id,'arrival',e.target.value)}/>
                     </div>
                     <div className="field"><label>Burst</label>
-                      <input type="number" min="1" value={p.burst} onChange={e => updateProcess(p.id,'burst',e.target.value)}/>
+                      <input type="number" min="1" max={MAX_TIME} value={p.burst} onChange={e => updateProcess(p.id,'burst',e.target.value)}/>
                     </div>
                     <div className="field"><label>Priority</label>
                       <input type="number" min="1" value={p.priority} onChange={e => updateProcess(p.id,'priority',e.target.value)}/>
@@ -1094,8 +1098,7 @@ function App() {
                   </div>
                 </div>
               ))}
-              {/* BUG FIX: UI cap raised from 6 to 20 to match backend limit */}
-              {processes.length < 20 && (
+              {processes.length < MAX_PROCESSES && (
                 <button className="add-btn" onClick={addProcess}>＋ Add Process</button>
               )}
             </div>
@@ -1231,6 +1234,7 @@ function App() {
                     <div key={i}
                       className={`gantt-block ${block.isSwitch?'context-switch':''} ${isActive?'active-process':''}`}
                       style={{
+                        left:`${(block.start/ganttWidth)*100}%`,
                         width:`${w}%`,
                         background:block.isSwitch ? undefined : block.color?.bg,
                         opacity:(simState==='idle'||simState==='done') ? 1 : (isVisible||isActive ? 1 : 0.12),
@@ -1263,9 +1267,11 @@ function App() {
                 )}
               </div>
               <div className="gantt-time-row">
-                {Array.from({length:Math.min(result.totalTime+1,21)},(_,i) => {
+                {Array.from({length:tickCount},(_,i) => {
                   const t = Math.round(i*result.totalTime/Math.min(result.totalTime,20));
-                  return <div key={t} className="gantt-tick" style={{left:`${(t/result.totalTime)*100}%`}}>{t}</div>;
+                  // Keep the first and last labels inside the chart instead of centring them on the edge
+                  const shift = i === 0 ? 'none' : i === tickCount-1 ? 'translateX(-100%)' : undefined;
+                  return <div key={t} className="gantt-tick" style={{left:`${(t/result.totalTime)*100}%`, transform:shift}}>{t}</div>;
                 })}
               </div>
             </div>
@@ -1289,8 +1295,8 @@ function App() {
                   <MetricCard color="green"  label="Avg Turnaround"  value={result.avgTurnaround.toFixed(2)} unit="ms" history={metricHistory.tat}/>
                   <MetricCard color="purple" label="CPU Utilization" value={result.cpuUtil.toFixed(1)} unit="%" history={metricHistory.util}/>
                   <MetricCard color="amber"  label="Context Switches" value={result.contextSwitches} unit=""/>
-                  <MetricCard color="red"    label="CS Overhead"     value={(result.contextSwitches*csOverheadMs).toFixed(1)} unit="ms"/>
-                  <MetricCard color="blue"   label="Perf Loss"       value={Math.min(100,(result.contextSwitches*csOverheadMs)/(result.totalTime*10+result.contextSwitches*csOverheadMs)*100).toFixed(1)} unit="%"/>
+                  <MetricCard color="red"    label="CS Overhead"     value={cs.overhead.toFixed(1)} unit="ms"/>
+                  <MetricCard color="blue"   label="Perf Loss"       value={cs.perfLoss.toFixed(1)} unit="%"/>
                 </div>
               </div>
 
@@ -1309,7 +1315,6 @@ function App() {
                     {backendError && (
                       <div style={{fontSize:11,color:'var(--danger)',fontFamily:'JetBrains Mono',padding:'6px 0'}}>
                         ✗ {backendError}
-                        {/* BUG FIX: corrected module name from backend to main */}
                         <div style={{marginTop:4,fontSize:9,color:'var(--text3)'}}>
                           Start with: uvicorn main:app --reload --port 8000
                         </div>
@@ -1320,7 +1325,7 @@ function App() {
                         {Object.entries(backendResult.metrics||{}).map(([k,v]) => (
                           <div key={k} style={{background:'rgba(0,245,160,0.06)',borderRadius:6,padding:'7px 10px',border:'1px solid rgba(0,245,160,0.12)'}}>
                             <div style={{fontSize:9,color:'var(--neon2)',letterSpacing:1,textTransform:'uppercase',marginBottom:3}}>{k.replace(/_/g,' ')}</div>
-                            <div style={{fontSize:14,fontWeight:800,fontFamily:'JetBrains Mono',color:'var(--text)'}}>{typeof v==='number'?v.toFixed(2):v}</div>
+                            <div style={{fontSize:14,fontWeight:800,fontFamily:'JetBrains Mono',color:'var(--text)'}}>{typeof v==='number'?(Number.isInteger(v)?v:v.toFixed(2)):v}</div>
                           </div>
                         ))}
                       </div>
@@ -1419,7 +1424,7 @@ function App() {
                           <div className="compare-metric"><span className="compare-metric-label">Avg TAT</span><span className="compare-metric-val" style={{color:'var(--neon2)'}}>{r.avgTurnaround.toFixed(1)}</span></div>
                           <div className="compare-metric"><span className="compare-metric-label">CS Count</span><span className="compare-metric-val" style={{color:'var(--gold)'}}>{r.contextSwitches}</span></div>
                           <div className="compare-metric"><span className="compare-metric-label">CPU Util</span><span className="compare-metric-val" style={{color:'#a5b4fc'}}>{r.cpuUtil.toFixed(1)}%</span></div>
-                          <div className="compare-metric"><span className="compare-metric-label">CS Cost</span><span className="compare-metric-val" style={{color:'var(--danger)'}}>{r.contextSwitches*csOverheadMs}ms</span></div>
+                          <div className="compare-metric"><span className="compare-metric-label">CS Cost</span><span className="compare-metric-val" style={{color:'var(--danger)'}}>{csStats(r, csOverheadMs).overhead}ms</span></div>
                         </div>
                       );
                     })}
@@ -1450,7 +1455,7 @@ function App() {
               Total: <span style={{color:'var(--text)'}}>{result.totalTime}ms</span>
             </span>
             <span>Switches: <span style={{color:'var(--gold)'}}>{result.contextSwitches}</span></span>
-            <span>Overhead: <span style={{color:'var(--danger)'}}>{(result.contextSwitches*csOverheadMs).toFixed(1)}ms</span></span>
+            <span>Overhead: <span style={{color:'var(--danger)'}}>{cs.overhead.toFixed(1)}ms</span></span>
             <span>Backend: <span style={{color:backendStatus==='connected'?'var(--neon2)':'var(--text3)'}}>
               {backendStatus==='connected'?'API LIVE':'LOCAL'}
             </span></span>
@@ -1471,7 +1476,6 @@ function App() {
   );
 }
 
-// BUG FIX: ReactDOM.render is deprecated in React 18 — upgraded to createRoot
 const container = document.getElementById('root');
 const reactRoot = ReactDOM.createRoot(container);
 reactRoot.render(<App/>);
